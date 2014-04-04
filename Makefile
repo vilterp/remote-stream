@@ -1,3 +1,2 @@
 compile:
-	mkdir -p build
-	tsc --outDir build src/test.ts
+	tsc --outDir build src/test.ts --module commonjs

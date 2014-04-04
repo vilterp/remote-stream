@@ -1,4 +1,4 @@
-module Reactive {
+export module Reactive {
     
     export class StreamController<A> {
         
@@ -10,10 +10,6 @@ module Reactive {
 
         add(evt : A) : void {
             this.stream.trigger_event(evt);
-        }
-
-        error(err : any) : void {
-            this.stream.trigger_error(err);
         }
 
         close(reason : any) : void {
@@ -58,23 +54,14 @@ module Reactive {
             }
         }
     
-        trigger_error(error) {
-            if (!this.closed) {
-                this.observers.map((observer) => observer.on_error(error));
-            } else {
-                throw 'closed';
-            }
-        }
-    
         trigger_close(reason) {
             this.closed = true;
             return this.observers.map((observer) => observer.on_close(reason));
         }
     
         listen(event_cb : (A) => void,
-               error_cb? : (any) => void,
                close_cb? : (any) => void) : Observer<A> {
-            var observer = new Observer(this, event_cb, error_cb, close_cb);
+            var observer = new Observer(this, event_cb, close_cb);
             this.add_observer(observer);
             return observer;
         }
@@ -83,7 +70,6 @@ module Reactive {
             var controller = new StreamController<B>();
             this.listen(
                 (event) => controller.add(func(event)),
-                (error) => controller.error(error),
                 (reason) => controller.close(reason)
             );
             return controller.stream;
@@ -99,7 +85,6 @@ module Reactive {
                         controller.add(event);
                     }
                 },
-                (err) => controller.error(err),
                 (reason) => controller.close(reason)
             );
             return controller.stream;
@@ -113,7 +98,6 @@ module Reactive {
                         controller.add(event);
                     }
                 },
-                (error) => controller.error(error),
                 (reason) => controller.close(reason)
             );
             return controller.stream;
@@ -161,7 +145,6 @@ module Reactive {
             var repr = name ? name : this.toString();
             this.listen(
                 (event) => console.log(repr + ':event:', event),
-                (error) => console.log(repr + ':error:', error),
                 (reason) => console.log(repr + ':close:', reason)
             );
         }
@@ -172,7 +155,6 @@ module Reactive {
         
         constructor(public stream : Stream<A>,
                     public event_cb : (A) => void,
-                    public error_cb? : (any) => void,
                     public close_cb? : (any) => void) {}
     
         toString() {
@@ -181,14 +163,6 @@ module Reactive {
     
         on_event(event) : void {
             this.event_cb(event);
-        }
-    
-        on_error(error) : void {
-            if (this.error_cb) {
-                this.error_cb(error);
-            } else {
-                throw error;
-            }
         }
     
         on_close(reason) : void {

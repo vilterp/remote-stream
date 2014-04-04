@@ -1,18 +1,19 @@
 /// <reference path="typings/node/node.d.ts"/>
 /// <reference path="reactive/core.ts"/>
 
+import net = require('net');
+import r = require('./reactive/core');
+
 // == TCP STUFF ====================================================================================
 
-import net = require('net');
-
-module RemoteStream.Channel {
+export module RemoteStream.Channel {
 
   export class SocketChannel implements RemoteStream.TwoWayMessageChannel {
 
-    incoming:Reactive.Stream<string>;
+    incoming:r.Reactive.Stream<string>;
 
     constructor(public socket : net.Socket) {
-      var controller = new Reactive.StreamController<string>();
+      var controller = new r.Reactive.StreamController<string>();
       this.socket.setEncoding('utf8');
       this.socket.on('data', (data) => {
         controller.add(data);
@@ -20,7 +21,7 @@ module RemoteStream.Channel {
       this.incoming = controller.stream;
     }
 
-    send(msg:string) {
+    send(msg : string) {
       this.socket.write(msg);
     }
 
@@ -28,14 +29,14 @@ module RemoteStream.Channel {
 
 }
 
-module RemoteStream {
+export module RemoteStream {
 
   // == CHANNEL ======================================================================================
 
   export interface TwoWayMessageChannel {
 
     // TODO: also for byte chunks
-    incoming : Reactive.Stream<string>;
+    incoming : r.Reactive.Stream<string>;
     send(msg : string);
 
   }
@@ -79,7 +80,7 @@ module RemoteStream {
     value : any;
   }
 
-  interface FutureErrorMessage {
+  interface FutureErrorMessage extends FutureMessage {
     error : any;
   }
 
@@ -101,11 +102,11 @@ module RemoteStream {
     nextStreamId : number; // returned stream
     nextFutureId : number; // returned future
 
-    openCalls : { [id : number]: Reactive.Completer<any> }; // waiting for response
-    openStreams : { [id : number]: Reactive.StreamController<any> }; // waiting for more events & close
-    openFutures : { [id : number]: Reactive.Completer<any> }; // waiting for completion or error
+    openCalls : { [id : number]: r.Reactive.Completer<any> }; // waiting for response
+    openStreams : { [id : number]: r.Reactive.StreamController<any> }; // waiting for more events & close
+    openFutures : { [id : number]: r.Reactive.Completer<any> }; // waiting for completion or error
 
-    methods : { [name : string]: () => Function };
+    methods : { [name : string]: Function };
 
     constructor(public channel : TwoWayMessageChannel) {
       this.nextCallId = 0;
@@ -120,14 +121,15 @@ module RemoteStream {
 
       this.channel.incoming.listen((str) => {
         var msg = JSON.parse(str);
+        console.log(msg);
         // TODO: should throw malformed message error on cast failure...
-        if(msg instanceof ReturnMessage) {
+        if(msg.hasOwnProperty('call_id') && msg.hasOwnProperty('value')) {
           this.handleReturnMessage(<ReturnMessage>msg);
-        } else if(msg instanceof StreamMessage) {
+        } else if(msg.hasOwnProperty('stream_id')) {
           this.handleStreamMessage(<StreamMessage>msg);
-        } else if(msg instanceof FutureMessage) {
+        } else if(msg.hasOwnProperty('future_id')) {
           this.handleFutureMessage(<FutureMessage>msg);
-        } else if(msg instanceof CallMessage) {
+        } else if(msg.hasOwnProperty('method')) {
           this.handleCallMessage(<CallMessage>msg);
         } else {
           throw new MalformedMessageError(str);
@@ -136,16 +138,17 @@ module RemoteStream {
     }
 
     // TODO: check # args...
-    call(method : string, args : Array<any>) : Reactive.Future<any> {
+    call(method : string, args : Array<any>) : r.Reactive.Future<any> {
       var msg:CallMessage = {
         call_id: this.nextCallId,
         method: method,
         args: args
       };
-      this.openCalls[this.nextCallId] = new Reactive.Completer<any>();
+      var completer = new r.Reactive.Completer<any>();
+      this.openCalls[this.nextCallId] = completer;
       this.channel.send(JSON.stringify(msg));
       this.nextCallId++;
-      return null;
+      return completer.future;
     }
 
     register(name : string, implementation : Function) {
@@ -171,9 +174,9 @@ module RemoteStream {
       if(!controller) {
         throw new NonexistentStreamError(msg.stream_id, msg);
       }
-      if(msg instanceof StreamEventMessage) { // I want pattern matching waahhhh
+      if(msg.hasOwnProperty('event')) { // I want pattern matching waahhhh
         controller.add(this.decodeMessage((<StreamEventMessage>msg).event));
-      } else if(msg instanceof StreamCloseMessage) {
+      } else if(msg.hasOwnProperty('reason')) {
         controller.close((<StreamCloseMessage>msg).reason);
         delete this.openStreams[msg.stream_id];
       }
@@ -184,9 +187,9 @@ module RemoteStream {
       if(!completer) {
         throw new NonexistentFutureError(msg.future_id, msg);
       }
-      if(msg instanceof FutureCompletedMessage) {
+      if(msg.hasOwnProperty('value')) {
         completer.complete(this.decodeMessage((<FutureCompletedMessage>msg).value));
-      } else if(msg instanceof FutureErrorMessage) {
+      } else if(msg.hasOwnProperty('error')) {
         completer.error((<FutureErrorMessage>msg).error);
       }
       delete this.openFutures[msg.future_id];
@@ -213,15 +216,16 @@ module RemoteStream {
       if(!(msg instanceof Object)) {
         return msg;
       } else {
-        if(msg instanceof NewFutureValue) {
+        if(msg.hasOwnProperty('__future_id__')) {
           var nfv = <NewFutureValue>msg;
-          var completer = new Reactive.Completer<any>();
+          var completer = new r.Reactive.Completer<any>();
           this.openFutures[nfv.__future_id__] = completer;
-          return completer;
-        } else if(msg instanceof NewStreamValue) {
+          return completer.future;
+        } else if(msg.hasOwnProperty('__stream_id__')) {
           var nsv = <NewStreamValue>msg;
-          var controller = new Reactive.StreamController<any>();
+          var controller = new r.Reactive.StreamController<any>();
           this.openStreams[nsv.__stream_id__] = controller;
+          return controller.stream;
         } else {
           // TODO: avoid this copying...
           var new_msg = {};
@@ -237,16 +241,18 @@ module RemoteStream {
       if(!(msg instanceof Object)) {
         return msg;
       } else {
-        if(msg instanceof Reactive.Future) {
+        if(msg instanceof r.Reactive.Future) {
           var res = {
             __future_id__: this.nextFutureId
           };
+          this.transmitFuture(this.nextFutureId, <r.Reactive.Future<any>> msg);
           this.nextFutureId++;
           return res;
-        } else if(msg instanceof Reactive.Stream) {
+        } else if(msg instanceof r.Reactive.Stream) {
           var res1 = {
             __stream_id__: this.nextStreamId
           }
+          this.transmitStream(this.nextStreamId, <r.Reactive.Stream<any>> msg);
           this.nextStreamId++;
           return res1;
         } else {
@@ -259,6 +265,45 @@ module RemoteStream {
       }
     }
 
+    private transmitFuture(id : number, future : r.Reactive.Future<any>) {
+      future.then(
+        (value) => {
+          var msg:FutureCompletedMessage = {
+            future_id: id,
+            value: value
+          }
+          this.channel.send(JSON.stringify(msg));
+          return null;
+        },
+        (err) => {
+          var msg:FutureErrorMessage = {
+            future_id: id,
+            error: err
+          };
+          this.channel.send(JSON.stringify(msg));
+        }
+      );
+    }
+
+    private transmitStream(id : number, stream : r.Reactive.Stream<any>) {
+      stream.listen(
+        (evt) => {
+          var msg:StreamEventMessage = {
+            stream_id: id,
+            event: evt
+          };
+          this.channel.send(JSON.stringify(msg));
+        },
+        (reason) => {
+          var msg:StreamCloseMessage = {
+            stream_id: id,
+            reason: reason
+          };
+          this.channel.send(JSON.stringify(msg));
+        }
+      );
+    }
+
   }
 
   // == ERRORS =======================================================================================
@@ -267,7 +312,7 @@ module RemoteStream {
     constructor(public message : any) {}
   }
 
-  export class NonexistentCallError extends ProtocolError {
+  class NonexistentCallError extends ProtocolError {
     constructor(public call_id : number, message : any) {
       super(message);
     }
