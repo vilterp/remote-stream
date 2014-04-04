@@ -96,6 +96,7 @@ export module RemoteStream {
 
   // == CONNECTION ===================================================================================
 
+  // TODO: handle socket termination
   export class Connection {
 
     nextCallId : number; // outgoing call
@@ -151,6 +152,7 @@ export module RemoteStream {
       return completer.future;
     }
 
+    // TODO: should probably allow returning normal values, not just futures
     register(name : string, implementation : Function) {
       if(this.methods[name]) {
         throw "method already registered: " + name;

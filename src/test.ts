@@ -1,6 +1,8 @@
 /// <reference path="typings/node/node.d.ts"/>
 
 import net = require('net');
+import cp = require('child_process');
+
 import rs = require('./protocol');
 import r = require('./reactive/core');
 
@@ -16,6 +18,20 @@ class TimerServer extends rs.RemoteStream.Connection {
         tick++;
       }, intervalMs);
       return r.Reactive.Future.immediate(controller.stream);
+    });
+    this.register('start-proc', (cmd:string, args:Array<string>) => {
+      var proc = cp.spawn(cmd, args);
+      var cont = new r.Reactive.StreamController<any>();
+      proc.stdout.setEncoding('utf8');
+      proc.stdout.on('data', (data) => cont.add(data));
+      var comp = new r.Reactive.Completer<any>();
+      proc.on('exit', (info) => comp.complete(info));
+      var msg = {
+        pid: proc.pid,
+        exit: comp.future,
+        stdout: cont.stream
+      };
+      return r.Reactive.Future.immediate(msg);
     });
   }
 
@@ -38,6 +54,11 @@ if(process.argv[2] == 'server') {
     var conn1 = new rs.RemoteStream.Connection(chan1);
     conn1.call('ticks', [100]).map((stream) => {
       stream.listen(console.log);
+    });
+    conn1.call('start-proc', ['node', ['./tick.js', '10']]).map((msg) => {
+      console.log('pid:', msg.pid);
+      msg.stdout.listen((evt) => console.log('stdout:', evt));
+      msg.exit.map((info) => console.log('exit:', info));
     });
   });
 }
