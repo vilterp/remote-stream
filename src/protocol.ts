@@ -160,8 +160,6 @@ export module RemoteStream {
       this.methods[name] = implementation;
     }
 
-    // TODO: decode contained messages into streams, etc
-
     private handleReturnMessage(msg : ReturnMessage) {
       var completer = this.openCalls[msg.call_id];
       if(!completer) {
