@@ -18,9 +18,14 @@ export module RemoteStream.Channel {
       this.socket.on('data', (data) => {
         controller.add(data);
       });
+      this.socket.on('close', (evt) => {
+        controller.close('socket disconnected');
+      });
       this.incoming = controller.stream;
     }
 
+    // TODO: currently caller's responsibility to check if incoming is closed...
+    // should there be a property or signal here saying whether this channel is closed?
     send(msg : string) {
       this.socket.write(msg);
     }
@@ -94,6 +99,17 @@ export module RemoteStream {
     __future_id__ : number;
   }
 
+  // Errors
+
+  interface ErrorMessage {
+    error: any
+  }
+
+  interface NonexistentMethodMessage {
+    method : string;
+    call_id : number;
+  }
+
   // == CONNECTION ===================================================================================
 
   // TODO: handle socket termination
@@ -120,22 +136,28 @@ export module RemoteStream {
 
       this.methods = {};
 
-      this.channel.incoming.listen((str) => {
-        var msg = JSON.parse(str);
-        console.log(msg);
-        // TODO: should throw malformed message error on cast failure...
-        if(msg.hasOwnProperty('call_id') && msg.hasOwnProperty('value')) {
-          this.handleReturnMessage(<ReturnMessage>msg);
-        } else if(msg.hasOwnProperty('stream_id')) {
-          this.handleStreamMessage(<StreamMessage>msg);
-        } else if(msg.hasOwnProperty('future_id')) {
-          this.handleFutureMessage(<FutureMessage>msg);
-        } else if(msg.hasOwnProperty('method')) {
-          this.handleCallMessage(<CallMessage>msg);
-        } else {
-          throw new MalformedMessageError(str);
-        }
-      });
+      this.channel.incoming.listen(
+        (str) => {
+          var msg = JSON.parse(str);
+//          console.log(msg);
+          // TODO: should throw malformed message error on cast failure...
+          if(msg.hasOwnProperty('call_id') && msg.hasOwnProperty('value')) {
+            this.handleReturnMessage(<ReturnMessage>msg);
+          } else if(msg.hasOwnProperty('stream_id')) {
+            this.handleStreamMessage(<StreamMessage>msg);
+          } else if(msg.hasOwnProperty('future_id')) {
+            this.handleFutureMessage(<FutureMessage>msg);
+          } else if(msg.hasOwnProperty('method')) {
+            this.handleCallMessage(<CallMessage>msg);
+          } else if(msg.hasOwnProperty('error')) {
+            this.handleErrorMessage(<ErrorMessage>msg);
+          } else {
+            throw new MalformedMessageError(str);
+          }
+        },
+        (reason) => {
+          this.closeEverything(reason);
+        });
     }
 
     // TODO: check # args...
@@ -147,7 +169,7 @@ export module RemoteStream {
       };
       var completer = new r.Reactive.Completer<any>();
       this.openCalls[this.nextCallId] = completer;
-      this.channel.send(JSON.stringify(msg));
+      this.stringifySend(msg);
       this.nextCallId++;
       return completer.future;
     }
@@ -198,17 +220,33 @@ export module RemoteStream {
     private handleCallMessage(msg : CallMessage) {
       var implementation = this.methods[msg.method];
       if(!implementation) {
-        throw new NonexistentMethodError(msg.method, msg);
-      }
-      // TODO: make sure scoping, etc is right here...
-      implementation.apply({}, msg.args).map((result) => {
-        var encoded = this.encodeMessage(result);
-        var retMsg : ReturnMessage = {
-          call_id : msg.call_id,
-          value : encoded
+        var err_msg:ErrorMessage = {
+          error: {
+            call_id: msg.call_id,
+            method: msg.method
+          }
         };
-        this.channel.send(JSON.stringify(retMsg));
-      });
+        this.stringifySend(err_msg);
+      } else {
+        implementation.apply({}, msg.args).map((result) => {
+          var encoded = this.encodeMessage(result);
+          var retMsg : ReturnMessage = {
+            call_id : msg.call_id,
+            value : encoded
+          };
+          this.stringifySend(retMsg);
+        });
+      }
+    }
+
+    private handleErrorMessage(msg : ErrorMessage) {
+      var error = msg.error;
+      if(error.hasOwnProperty('method')) {
+        var nmm = <NonexistentMethodMessage>error;
+        throw new NonexistentMethodError(nmm.method, nmm.call_id);
+      } else {
+        throw new MalformedMessageError(msg);
+      }
     }
 
     // TODO: better name. not exactly decoding
@@ -251,7 +289,7 @@ export module RemoteStream {
         } else if(msg instanceof r.Reactive.Stream) {
           var res1 = {
             __stream_id__: this.nextStreamId
-          }
+          };
           this.transmitStream(this.nextStreamId, <r.Reactive.Stream<any>> msg);
           this.nextStreamId++;
           return res1;
@@ -271,8 +309,8 @@ export module RemoteStream {
           var msg:FutureCompletedMessage = {
             future_id: id,
             value: value
-          }
-          this.channel.send(JSON.stringify(msg));
+          };
+          this.stringifySend(msg);
           return null;
         },
         (err) => {
@@ -280,7 +318,7 @@ export module RemoteStream {
             future_id: id,
             error: err
           };
-          this.channel.send(JSON.stringify(msg));
+          this.stringifySend(msg);
         }
       );
     }
@@ -292,16 +330,43 @@ export module RemoteStream {
             stream_id: id,
             event: evt
           };
-          this.channel.send(JSON.stringify(msg));
+          this.stringifySend(msg);
         },
         (reason) => {
           var msg:StreamCloseMessage = {
             stream_id: id,
             reason: reason
           };
-          this.channel.send(JSON.stringify(msg));
+          this.stringifySend(msg);
         }
       );
+    }
+    
+    private stringifySend(msg : any) {
+      if(this.channel.incoming.closed) {
+        // TODO: report some other way than logging...
+        console.error('attempt to send message when channel is closed', msg);
+      } else {
+        this.channel.send(JSON.stringify(msg));
+      }
+    }
+
+    // TODO: erroring futures and closing streams is a decent solution, but it's really a kludge,
+    // since both of those things should be application-level, not connection-level.
+    private closeEverything(reason : any) {
+      var notification = new ConnClosedNotification(reason);
+      for(var call_id in this.openCalls) {
+        var call_comp = this.openCalls[call_id];
+        call_comp.error(notification);
+      }
+      for(var fut_id in this.openFutures) {
+        var fut_comp = this.openFutures[fut_id];
+        fut_comp.error(notification);
+      }
+      for(var stream_id in this.openStreams) {
+        var controller = this.openStreams[stream_id];
+        controller.close(notification);
+      }
     }
 
   }
@@ -330,16 +395,18 @@ export module RemoteStream {
     }
   }
 
-  class NonexistentMethodError extends ProtocolError {
-    constructor(public method : string, message : any) {
-      super(message);
-    }
-  }
-
   class MalformedMessageError extends ProtocolError {
     constructor(message : any) {
       super(message);
     }
+  }
+
+  class NonexistentMethodError {
+    constructor(public method : string, public call_id : number) {}
+  }
+
+  class ConnClosedNotification {
+    constructor(public reason : any) {}
   }
 
 }
