@@ -310,7 +310,9 @@ export module RemoteStream {
             future_id: id,
             value: value
           };
-          this.stringifySend(msg);
+          if(!this.channel.incoming.closed) {
+            this.stringifySend(msg);
+          }
           return null;
         },
         (err) => {
@@ -318,13 +320,15 @@ export module RemoteStream {
             future_id: id,
             error: err
           };
-          this.stringifySend(msg);
+          if(!this.channel.incoming.closed) {
+            this.stringifySend(msg);
+          }
         }
       );
     }
 
     private transmitStream(id : number, stream : r.Reactive.Stream<any>) {
-      stream.listen(
+      var obs = stream.listen(
         (evt) => {
           var msg:StreamEventMessage = {
             stream_id: id,
@@ -340,15 +344,14 @@ export module RemoteStream {
           this.stringifySend(msg);
         }
       );
+      // unsubscribe if we lose connection
+      this.channel.incoming.listen(() => {}, (reason) => {
+        obs.unsubscribe();
+      });
     }
     
     private stringifySend(msg : any) {
-      if(this.channel.incoming.closed) {
-        // TODO: report some other way than logging...
-        console.error('attempt to send message when channel is closed', msg);
-      } else {
-        this.channel.send(JSON.stringify(msg));
-      }
+      this.channel.send(JSON.stringify(msg));
     }
 
     // TODO: erroring futures and closing streams is a decent solution, but it's really a kludge,
